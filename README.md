@@ -10,20 +10,23 @@
 		logviwer
 		supervisor
 		
-### worker
+### worker（进程）
 	
 	storm 集群的一个节点上可能有一个或多个拓扑上，一个工作进程执行拓扑的一个子集。工作进程属于一个特定的拓扑，
 	并可能为这个拓扑的一个或多个组件（spout、bolt）运行一个或多个执行器。一个运行中的拓扑包括多个运行在 storm 
 	集群内多个节点的进程。拓扑的工作进程数可以通过 Config.TOPOLOGY_WORKERS 设置。
+	
+	Storm进程间的通信实现：
+	![storm-worker-process](../imgs/storm-worker-process.png)
 		
-### executor
+### executor（线程，运行一个拓扑的一种组件任务[spout或bolt]）
 	
 	一个或多个执行器可能运行在一个或多个工作进程内，执行器是由工作进程产生的一个线程，它为相同的组件（spout、bolt）
 	运行一个或多个任务（task）。每个组件的执行器的初始数量可以通过 TopologyBuilder#setSpout 或 TopologyBuilder#setBolt 
 	的 parallelism_hint 参数设置。可以通过 Config.TOPOLOGY_MAX_TASK_PARALLELISM 或 config.setMaxTaskParallelism(3) 
 	来配置该选项。
 	
-### task
+### task（逻辑概念，运行在执行器中的任务实例，它是最终完成数据处理的实体单元）
 	
 	一个组件的任务数量始终贯穿拓扑的整个生命周期，但一个组件的执行器（线程）数量可以随时间而改变，这意味着 #threads <= #tasks。
 	默认情况下任务的数量被设定为相同的执行器数量，即 storm 会用一个线程 executor 执行一个 task 任务。每个组件的任务数量可以通过 
@@ -95,7 +98,7 @@
 	
 ### stream
 	
-	略	
+	略
 		
 ### stream grouping
 
@@ -145,7 +148,7 @@
 	   使用时通过 topologyBuilder.setBolt("bolt2", new Bolt2(), 5).customGrouping("a", new XxxGroupring());
 	
 ### spout
-
+	
 	类图：
 	IComponent
 	  |--IRichStateSpout
@@ -185,12 +188,12 @@
 	JMS 作为数据源，storm-jms
 	redis 作为数据源，storm-redis-pubsub
 	
-	
 ### bolt
 
 	IComponent
 	  |--IBatchBolt
 	       |--BaseBatchBolt
+	           |--BaseTransactionalBolt
 	  |--IRichBolt
 	       |--BaseRichBolt
 	  |--IBasicBolt
@@ -223,6 +226,18 @@
 		}
 	}
 	
+	Spout消息到Bolt的执行过程：
+	假设同属于一个Topology的Spout与Bolt分别处于不同的JVM，即不同的worker中，不同的JVM可能处于同一台物理机器，也可能处于不同的物理机器中。
+	为了让情景简单，认为JVM处于不同的物理机器中。
+	a) spout的输出通过该spout所处worker的消息输出线程，将tuple输入到Bolt所属的worker。它们之间的通路是socket连接，用ZeroMQ或Netty实现。
+	b) bolt所处的worker有一个专门处理socket消息的receive thread 接收到spout发送来的tuple。
+	c) receive thread将接收到的消息传送给对应的bolt所在的executor。 在worker进程内部,消息传递使用的是Lmax Disruptor pattern。
+	d) executor接收到tuple之后，由event-handler进行处理。
+	
+	CoordinatedBolt的原理:
+	对于用户在DRPC, Transactional Topology里面的Bolt，都被CoordinatedBolt包装了一层：也就是说在DRPC, Transactional Topology
+	里面的topology里面运行的已经不是用户提供的原始的Bolt, 而是一堆CoordinatedBolt, CoordinatedBolt把这些Bolt的事务都代理了。
+	
 ### hook
 
 	storm 提供了钩子，使用它可以在 storm 内部插入自定义代码来运行任意数量的事件。可以通过实现 ITaskHook 或继承 BaseTaskHook 
@@ -233,7 +248,7 @@
 	   它们对于在自定义的监控系统中进行集成是很有用的。
 
 ### anchering emit & ack or fail process
-
+	
 	发射消息：
 	spout 和 bolt 分别使用 SpoutOutputCollector 和 OutputCollector 发射消息（emit），并且 SpoutOutputCollector 和
 	OutputCollector 是线程安全的，可以作为组件的成员变量进行保存。anchering 和发射一个新的元组在同一时间完成，一个输出元组可
@@ -257,6 +272,40 @@
 	第二种是通过消息基础删除消息的可靠性，可以在 SpoutOutputCollector#emit 方法中忽略x消息的 id，关掉对于个别 spout 元组的跟踪；
 	第三种做法，如果你不关心拓扑的下游元组的特定子集是否无法处理，可以作为非固定元组（不锚定）发射它们，因为它们没有锚定到任何 spout 元组，
 	所以如果它们没有 acked，不会造成任何 spout 元组失败。
+	
+	[注1]
+	如果可靠性不是那么重要，那么不跟踪tuple树可以节省一半的消息，减少带宽占用。
+	
+	[注2]
+	当一个tuple在拓扑中被创建出来的时候，不管是在Spout中还是在Bolt中创建的，这个 tuple都会被配置一个随机的64位id。
+	acker就是使用这些id来跟踪每个spout tuple的 tuple DAG。这里贴一下storm源码分析里一个ack机制的例子。
+         
+                   T2
+                   2
+           |￣￣￣￣￣￣￣￣￣￣bolt2
+           |                  |
+           |                  | 5
+           |                  |
+           |        8         |/
+         spout <------------>  acker bolt
+           |        3          |\         |\
+           |                   |            \
+           |                   | 6           \ 7
+           |                   |              \ 
+           |                   |               \
+           |__________________bolt1______________bolt3
+                   1                    4
+                   T1                T3 T4 T5 
+     
+     理解下整个大体节奏分为几部分:
+     1、步骤1和步骤2中spout把一条信息同时发送给了bolt1和bolt2。
+     2、​步骤3表示spout emit成功后去acker bolt里注册本次根消息，ack值设定为本次发送的消息对应的64位id的异或运算值，上图对应的是T1^T2。
+     3、​步骤4表示bolt1收到T1后，单条tuple被拆成了三条消息T3、T4、T5发送给bolt3。
+     4、步骤6表示bolt1在ack()方法调用时会向acker bolt提交T1^T3^T4^T5的ack值。
+     5、步骤5和7的bolt都没有产生新消息，所以ack()的时候分别向acker bolt提交了T2 和T3^T4^T5的ack值。
+     6、​综上所述，本次spout产生的tuple树对应的ack值经过的运算为 T1^T2^T1^T3^T4^T5^T2^T3^T4^T5按照异或运算的规则，ack值最终正好归零。
+     7、​步骤8为acker bolt发现根spout最终对应的的ack是0以后认为所有衍生出来的数据都已经处理成功，它会通知对应的spout，spout会调用相应的ack方法。
+     storm这个机制的实现方式保证了无论一个tuple树有多少个节点，一个根消息对应的追踪ack值所占用的空间大小是固定的，极大地节约了内存空间。
 	
 ### 配置:
 	
@@ -324,6 +373,14 @@
 	第一个设计：每次处理一个元组，在当前元组未被拓扑处理成功之前，不对下一个元组进行处理。（没有用到 storm 的并行处理能力，效率低）
 	第二个设计：每个事物处理一批（batch）元组，并且 batch 之间的处理是严格有序的。（用到 storm 的并行处理能力，库操作也减少一些，但仍存在阻塞现象）
 	第三个设计：storm的设计，batch 的处理过程中，并非所有的工作都需要严格有序。例如，全局计数的计算可以分成两个部分，即计算 batch 的部分计数、
+	
+                              |￣
+                              |
+     Spout------->bolt1------>bolt2---------------------------------------->bolt3(commitor，标记需要事务处理)
+                            （并行）                                        （串行，实现ICommiter或TxTopoBuilder.setCommiterBolt）
+                             [batch3 processing...]                         [batch2, batch1 commiting(finishbatch)]
+                             [botch4 processing... execute & finishbatch]	       
+	
 	根据部分计数更新数据库中的全局计数。storm的 设计把 batch 的处理分成两个阶段：
 	1) 处理阶段（processing phase），在处理阶段，可以并行处理 batch；
 	2) 提交阶段（commit phase），在提交阶段，batch 之间是严格有序的。
@@ -349,6 +406,26 @@
 	5) 如果处理阶段成功，并且所有以前的事务都已成功提交，协调器会发射包含 TransactionAttempt 的元组到commit流；
 	6) 所有提交bolt使用广播分组订阅commit流，当提交发生时，它们会收到一个通知；
 	7) 类似处理阶段，协调器使用 Acking 框架检测提交阶段是否成功，如果它收到一个 ack，它标志着事务已经在 zk 中完成。
+	
+	事务Topology的实现：
+	事务性的Spout需要实现ITopologySpout，这个接口包括两个内部接口类 Coodinator和Emitter，在topology运行的时候，事务性的Spout
+	包含一个子Topology，结构如下：
+	
+	Coodinator task-----------Emitter task
+	              |___________Emitter task
+	              |___________Emitter task
+	              
+	a) 这里面有两种类型的tuple，一种是事务性的tuple，一种是batch中的tuple，coodinator开启一个事务准备发射一个batch时候，进入一个
+	事务的processing阶段，会发射一个事务性tuple（transactionAttempt & matadata）到batch emit流。Emitter以all grouping
+	的方式订阅coodinator的batch emit流，负责为每一个batch发射tuple，发射的tuple都必须以TransactionAttempt作为第一个field，
+	storm根据这个field判断tuple属于哪一个batch。coodinator只有一个，emitter根据并行度可以有多个实例。
+	b) TransactionAttempt包含两个值，一个transactionId，一个attemptId，transactionId对于每个batch中的tuple是唯一的，而且不管
+	这个batch replay多少次都是一样的。attemptId是对于每一个batch唯一的一个id，但是对于同一个batch，它replay之后的attemptId跟
+	replay之前就不一样了。我们可以把attemptId理解成replay-times，storm利用这个id区别一个batch发射tuple的不同版本。
+	c) matadata（元数据）中包含当前事务可以从哪个point进行重放数据，存放在zookeeper中，spout可以通过Kyyo从zookeeper中序列化和
+	反序列化该元数据。
+	
+	
 	
 	不透明事务 Spout：(Opaque Transactional Spout)
 	重复事务型状态的实现依赖于数据批次中包含数据保持不变，这种特性在系统遇到错误时就可能保证不了了。如果发射数据的spout发生了局部故障，
@@ -392,11 +469,10 @@
 	少量的状态到 zk 中。
 	IPartitionedTransactionalSpout：分区事务Spout从很多队列代理的分区中集中读取 batch，它自动管理每个分区的状态，保证等概率重发。
 	       
-                            ---------->发射器任务
+	                       __________ 发射器任务
 			             |
-			协调任务------|---------->发射器任务
-			             |
-			              ---------->发射器任务     
+               协调任务------|---------->发射器任务
+			             |__________ 发射器任务
 	        
 	 
 ### Trident
