@@ -16,8 +16,9 @@
 	并可能为这个拓扑的一个或多个组件（spout、bolt）运行一个或多个执行器。一个运行中的拓扑包括多个运行在 storm 
 	集群内多个节点的进程。拓扑的工作进程数可以通过 Config.TOPOLOGY_WORKERS 设置。
 	
-	Storm进程间的通信实现：
-	![storm-worker-process](../imgs/storm-worker-process.png)
+Storm进程间的通信实现：
+[storm-worker-process](../imgs/storm-worker-process.png)
+
 		
 ### executor（线程，运行一个拓扑的一种组件任务[spout或bolt]）
 	
