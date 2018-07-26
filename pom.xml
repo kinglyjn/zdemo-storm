@@ -1,0 +1,205 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<groupId>com.keyllo.storm</groupId>
+	<artifactId>zdemo-storm</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+
+	<!-- 参数管理 -->
+	<properties>
+		<finalname>zdemo-storm</finalname>
+		<java.version>1.8</java.version>
+		<storm.version>1.2.1</storm.version>
+	</properties>
+
+
+	<!-- 依赖管理 -->
+	<dependencies>
+		<!-- junit -->
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
+			<version>4.12</version>
+		</dependency>
+
+		<!-- storm -->
+		<dependency>
+			<groupId>org.apache.storm</groupId>
+			<artifactId>storm-core</artifactId>
+			<version>${storm.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+		    <groupId>org.apache.storm</groupId>
+		    <artifactId>storm-starter</artifactId>
+		    <version>${storm.version}</version>
+		    <scope>provided</scope>
+		</dependency>
+		
+		<!-- kafka -->
+		<dependency>
+			<groupId>org.apache.kafka</groupId>
+			<artifactId>kafka_2.11</artifactId>
+			<version>1.0.0</version>
+			<exclusions>
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-log4j12</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		
+		<!-- kryo -->
+		<dependency>
+	        <groupId>com.esotericsoftware</groupId>
+	        <artifactId>kryo</artifactId>
+	        <version>4.0.1</version>
+	    </dependency>
+	    <dependency>
+	        <groupId>com.esotericsoftware</groupId>
+	        <artifactId>kryo-shaded</artifactId>
+	        <version>4.0.1</version>
+	    </dependency>
+		
+		<!-- redis -->
+		<dependency>
+			<groupId>redis.clients</groupId>
+			<artifactId>jedis</artifactId>
+			<version>2.7.3</version>
+		</dependency>
+		
+		<!-- hbase -->
+		<dependency>
+			<groupId>org.apache.hbase</groupId>
+			<artifactId>hbase-client</artifactId>
+			<version>1.2.3</version>
+			<exclusions>
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-log4j12</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		
+        <!-- json -->
+		<dependency>
+			<groupId>com.alibaba</groupId>
+			<artifactId>fastjson</artifactId>
+			<version>1.2.29</version>
+		</dependency>
+		
+		<!-- log -->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-api</artifactId>
+			<version>1.6.5</version>
+		</dependency>
+		<dependency>
+			<groupId>log4j</groupId>
+			<artifactId>log4j</artifactId>
+			<version>1.2.17</version>
+		</dependency>
+		
+		<!-- commons -->
+		<dependency>
+			<groupId>org.apache.commons</groupId>
+			<artifactId>commons-lang3</artifactId>
+			<version>3.3.2</version>
+		</dependency>
+	</dependencies>
+
+
+	<!-- 构建管理 -->
+	<build>
+		<finalName>${finalname}</finalName>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<source>${java.version}</source>
+					<target>${java.version}</target>
+				</configuration>
+			</plugin>
+
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<configuration>
+					<createDependencyReducedPom>true</createDependencyReducedPom>
+				</configuration>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<transformers>
+								<transformer
+									implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+								<transformer
+									implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+								</transformer>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			
+			<!-- SSH远程执行插件 -->
+			<plugin>
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>wagon-maven-plugin</artifactId>
+				<version>1.0</version>
+				<dependencies>
+					<dependency>
+						<groupId>org.apache.maven.wagon</groupId>
+						<artifactId>wagon-ssh</artifactId>
+						<version>2.10</version>
+					</dependency>
+				</dependencies>
+				<configuration>
+					<!-- 事先在setting.xml中配置<server><id>nimbusz</id> <username>xxx</username> <password>xxx</password></server> -->
+					<serverId>nimbusz</serverId>
+					<!-- 需部署的文件或目录 -->
+					<fromFile>target/${finalname}.jar</fromFile>
+					<!-- 部署目录 -->
+					<url>scp://ubuntu@nimbusz/opt/data</url>
+					<commands>
+						<!-- 需要远程执行的命令 -->
+						<!-- <command><![CDATA[/opt/module/apache-storm-1.0.5/bin/storm jar /opt/data/${finalname}.jar test01.call.App LogAnalyserStorm]]></command> -->
+					</commands>
+					<displayCommandOutputs>true</displayCommandOutputs>
+					<failOnError>false</failOnError>
+				</configuration>
+				<executions>
+					<execution>
+						<id>ssh-upload</id>
+						<phase>package</phase>
+						<goals>
+							<goal>upload-single</goal>
+						</goals>
+					</execution>
+					<execution>
+						<id>ssh-sshexec</id>
+						<phase>package</phase>
+						<goals>
+							<goal>sshexec</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+		<resources>
+			<resource>
+				<directory>src/main/resources</directory>
+				<filtering>true</filtering>
+				<includes>
+					<include>**/*.properties</include>
+					<include>**/*.xml</include>
+				</includes>
+			</resource>
+		</resources>		
+	</build>
+</project>

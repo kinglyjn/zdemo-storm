@@ -1,0 +1,10 @@
+.settings
+target
+.classpath
+.project
+.springBeans
+.DS_Store
+.gitignore.swp
+.svn
+logs
+
