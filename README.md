@@ -189,15 +189,16 @@
 	redis 作为数据源，storm-redis-pubsub
 	
 ### bolt
-
+	ICommitter
 	IComponent
 	  |--IBatchBolt
 	       |--BaseBatchBolt
-	           |--BaseTransactionalBolt
+	           |--BaseTransactionalBolt*
 	  |--IRichBolt
-	       |--BaseRichBolt
+	       |--BaseRichBolt*
+	       |--CoordinatedBolt*
 	  |--IBasicBolt
-	       |--BaseBasicBolt
+	       |--BaseBasicBolt*
 	
 	使用普通的实现 IRichBolt 的接口的 bolt 实现消息的锚定和确认：
 	public class MyBolt implements IRichBolt {
@@ -363,23 +364,16 @@
 ### 事务拓扑
 
 	事务拓扑（Transactional Topology）是storm 0.7 引入的特性，在 0.8 版本中已经被封装为 Trident，提供了更加便利和直接的接口。
-	引入事务拓扑的目的是为了满足对消息处理有着极其严格要求的场景，例如实时计算某个用户的成交笔数，要求结果完全精确一致。事务拓扑可以实
-	现一次只有一次的语义，它可以保证每个tuple”被且仅被处理一次”。storm 的事务拓扑是基于它底层的spout/bolt/acker 原语实现的。简单
-	来说就是将元组分为一个个的 batch，同一个 batch 内的元组以及 batch 与 batch 之间的元组可以并行处理，另一方面，用户可以设置某些
-	bolt 为 Commiter，storm 可以保证 Commiter 的 finishBatch() 操作按严格不降序的顺序执行。用户可以利用这个特性通过简单的编程
-	技巧实现简单的消息处理的精确性。
+	引入事务拓扑的目的是为了满足对消息处理有着极其严格要求的场景（适合做汇总而不是过滤），例如实时计算某个用户的成交笔数，要求结果完
+	全精确一致。事务拓扑可以实现一次只有一次的语义，它可以保证每个tuple”被且仅被处理一次”。storm 的事务拓扑是基于它底层的
+	spout/bolt/acker 原语实现的。简单来说就是将元组分为一个个的 batch，同一个 batch 内的元组以及 batch 与 batch 之间的元组可
+	以并行处理，另一方面，用户可以设置某些bolt 为 Commiter，storm 可以保证 Commiter 的 finishBatch() 操作按严格不降序的顺序
+	执行。用户可以利用这个特性通过简单的编程技巧实现简单的消息处理的精确性。
 	
 	事务拓扑的核心是保证数据处理的严格有序：
 	第一个设计：每次处理一个元组，在当前元组未被拓扑处理成功之前，不对下一个元组进行处理。（没有用到 storm 的并行处理能力，效率低）
 	第二个设计：每个事物处理一批（batch）元组，并且 batch 之间的处理是严格有序的。（用到 storm 的并行处理能力，库操作也减少一些，但仍存在阻塞现象）
 	第三个设计：storm的设计，batch 的处理过程中，并非所有的工作都需要严格有序。例如，全局计数的计算可以分成两个部分，即计算 batch 的部分计数、
-	
-                              |￣
-                              |
-     Spout------->bolt1------>bolt2---------------------------------------->bolt3(commitor，标记需要事务处理)
-                            （并行）                                        （串行，实现ICommiter或TxTopoBuilder.setCommiterBolt）
-                             [batch3 processing...]                         [batch2, batch1 commiting(finishbatch)]
-                             [botch4 processing... execute & finishbatch]	       
 	
 	根据部分计数更新数据库中的全局计数。storm的 设计把 batch 的处理分成两个阶段：
 	1) 处理阶段（processing phase），在处理阶段，可以并行处理 batch；
@@ -397,19 +391,11 @@
 	   个事务清理产生的中间数据。
 	事务拓扑需要一个可以重发确切 batch 消息的消息队列系统，kestrel 无法做到这一点，apache kafka 非常合适。（原生kafka API 或 storm-kafka）
 	
-	事务 spout 的工作原理：
-	1) 事务spout是一个包含协调器spout（并行度为1） 和一个发射器bolt的子拓扑（并行度为P，使用广播分组连接到协调器spout的batch流）；
-	2) 当协调器决定进入事务的处理阶段的时候，它发射包含 TransactionAttempt 和事务元数据的元组到 batch 流；
-	3) 由于是广播分组，每一个发射器任务会收到通知，发射元组的一部分进行事务的尝试；
-	4) storm 自动管理贯穿整个拓扑必要的 Anchoring/Acking 以确定一个事务已经完成处理阶段。需要注意的是，根元组是由协调器创建的，
-	   因此如果处理阶段处理成功，协调器spout会收到一个ack，如果处理阶段因任何原因没有成功（例如故障或超时），协调器会收到一个 fail；
-	5) 如果处理阶段成功，并且所有以前的事务都已成功提交，协调器会发射包含 TransactionAttempt 的元组到commit流；
-	6) 所有提交bolt使用广播分组订阅commit流，当提交发生时，它们会收到一个通知；
-	7) 类似处理阶段，协调器使用 Acking 框架检测提交阶段是否成功，如果它收到一个 ack，它标志着事务已经在 zk 中完成。
 	
-	事务Topology的实现：
-	事务性的Spout需要实现ITopologySpout，这个接口包括两个内部接口类 Coodinator和Emitter，在topology运行的时候，事务性的Spout
-	包含一个子Topology，结构如下：
+	事务性Spout和事务性Bolt
+	--------—------------
+	事务性的Spout需要实现ITopologySpout，这个接口包括两个内部接口类 Coodinator和Emitter，在topology运行的时候，
+	事务性的Spout包含一个子Topology，结构如下：
 	
 	Coodinator task-----------Emitter task
 	              |___________Emitter task
@@ -424,56 +410,108 @@
 	replay之前就不一样了。我们可以把attemptId理解成replay-times，storm利用这个id区别一个batch发射tuple的不同版本。
 	c) matadata（元数据）中包含当前事务可以从哪个point进行重放数据，存放在zookeeper中，spout可以通过Kyyo从zookeeper中序列化和
 	反序列化该元数据。
+	元组的发射请求是幂等的，需要 TransactionSpout保存少量的状态到 zk 中。
+	IPartitionedTransactionalSpout：分区事务Spout从很多队列代理的分区中集中读取 batch，它自动管理每个分区的状态，保证等概率重发。
+	
+	事务性的Bolt（例如BaseTransactionalBolt）处理batch在一起的tuples，对于每一个tuple调用execute方法，而在整个batch处理阶段完成
+	的时候调用finishBatch方法。如果BatchBolt被标记成Committer，则只能在commit阶段调用finishBatch方法。一个batch的commit阶段是由
+	storm保证只在前一个batch成功提交之后才会执行。并且它会重试直到topology里面的所有bolt在commit完成提交。那么如何知道batch的process
+	完成了？也就是bolt是否接收并处理了batch里的所有tuple？其实事务性bolt和drpc的bolt通常被CoordinatedBolt包装成了代理类，使用这个
+	CoordinatedBolt模型即可完成上下游bolt之间的通信。每个CoordinatedBolt记录两个值，有哪些task给我发送了tuple（根据topo的groupring）
+	，等所有的tuple都发送完成之后，CoordinatedBolt通过另外一个特殊的stream以emitDirect的方式告诉所有他发送过的tuple的task，它发送了
+	多少个tuple给这个task，下游会将这个数字和自己已经收到的tuple数量做对比，如果相等则说明已经处理完了所有的tuple。下游的CoordinatedBolt
+	会重复上面的步骤，通知其下游。
+	
+                             |￣事务bolt或drpc的bolt被CoordinatedBolt包装     |￣被CoordinatedBolt包装的Bolt
+                             |  我处理完成上游tuples，是时候通知下游了！         |  我的上游通知我发送了N个tule，并且我处理完了上游的这N
+                             |  我发N个tuple给你哈！                          |  个tuple，是时候通知下游了！
+                             |                                              |
+                             |                                              |
+     Spout------->bolt1------>bolt2---------------------------------------->bolt3(commitor，标记需要事务处理)
+                            （并行）                                        （串行，实现ICommiter或TxTopoBuilder.setCommiterBolt）
+                             [batch3 processing...]                         [batch2, batch1 commiting(finishbatch)]
+                             [botch4 processing... execute & finishbatch]	       	
 	
 	
+	[注]标记为Committer的BatchBolt和普通BatchBolt的区别是调用 finishBatch 的时机。Committer BatchBolt 在提交阶段会调用
+	   finishBatch，当所有的batch 都已经成功提交，提交阶段会出现，它会不停重试，直到【拓扑中的所有 bolt 成功提交 batch】。
+	   有两种方法可以使 BatchBolt 成为 Committer BatchBolt，即实现ICommitter接口或者使用TransactionalTopologyBuilder
+	   类的 setCommiterBolt 方法。
 	
-	不透明事务 Spout：(Opaque Transactional Spout)
-	重复事务型状态的实现依赖于数据批次中包含数据保持不变，这种特性在系统遇到错误时就可能保证不了了。如果发射数据的spout发生了局部故障，
-	原始批次数据中的部分tuple可能无法重新发送。不透明型状态通过存储当前的状态和前一次状态来允许批次的数据组成发生变化。不透明型状态存
-	储了上一个状态信息，因此，当某批次数据重放时，可以使用新的聚合计数重新赋值。你可能会好奇，为什么可以在一批数据提交后还会再次应用这
-	批数据。对应的一种场景是状态已经更新成功了，但是下游处理失败。在我们的例子中，可能是告警信息发布失败。这种情况下Trident会重新发送
-	这批数据。在最坏的情况下，当要求spout重新发送这批数据时，可能有一个或者多个数据源不可用。在事务型spout中，需要一直等待直到数据源
-	恢复可用。不透明事务型spout会发送当前可用的数据分片，数据的处理照常进行。因为Trident是按照序列处理数据批次并记录状态，因此每个单
-	独的批次都不能延迟，因为延迟可能导致阻塞整个系统。
-	IOpaquePartitionedTransactionalSpout 是一个实现了不透明分区事务的Spout接口，OpaqueTransactionalKafkaSpout 是其中一个
-	例子。只要使用更新策略，OpaqueTransactionalKafkaSpout 可以承受失去独立的 kafka 节点而不用牺牲其准确性。
 	
-	事务拓扑的 API：
-	-------------------------
+	IPartitionedTransactionalSpout和IOpaquePartitionedTransactionalSpout:
+	--------—------------------------------------------------------------
+	二者的相同之处：
+	IPartitionedTransactionalSpout和IOpaquePartitionedTransactionalSpout都是把tuple封装成batch进行处理，同时可以保证每
+	一个tuple都被完整地处理，都支持消息重发。为了支持事务性，它们为每一个批次（batch）提供一个唯一的事务ID（transaction id：txid）
+	，txid是顺序递增的，而且保证对批次的处理是强有序的，即必须完整处理完txid=1才能再接着处理txid=2。
+	
+	二者的区别以及用法：
+	IPartitionedTransactionalSpout的每一个tuple都会绑定在固定的批次中。无论一个tuple重发多少次，它都在同一个批次里面，都有同样
+	的事务ID；一个tuple不会出现在两个以上的批次里。一个批次无论重发多少次，它也只有一个唯一且相同的事务ID，不会改变。这也就是说，一个
+	批次无论重发多少次，它所包含的内容都是完全一致的。
+	但是IPartitionedTransactionalSpout会有一个问题，虽然这种问题非常罕见：假设一批消息在被bolt消费过程中失败了，需要spout重发，
+	此时如果正巧遇到消息发送中间件故障，例如某一个分区不可读，spout为了保证重发时每一批次包含的tuple一致，它只能等待消息中间件恢复，
+	也就是卡在那里无法再继续发送给bolt消息了，直至消息中间件恢复。
+	IOpaquePartitionedTransactionalSpout[I.O.P.T.Spout]为了解决这个问题，它不保证每次重发一个批次的消息所包含的tuple完全一
+	致。也就是说某个tuple可能第一次在txid=2的批次中出现，后面有可能在txid=5的批次中出现。这种情况只出现在当某一批次消息消费失败需
+	要重发且恰巧消息中间件故障时。这时，I.O.P.T.Spout 不是等待消息中间件故障恢复，而是先读取可读的partition。例如txid=2的批次在
+	消费过程中失败了，需要重发，恰巧消息中间件的16个分区有1个分区(partition=3)因为故障不可读了。这时候I.O.P.T.Spout会先读另外的
+	15个分区，完成txid=2这个批次的发送，这时候同样的批次其实包含的tuple已经少了。假设在txid=5时消息中间件的故障恢复了，那之前在
+	txid=2且在分区partition=3的tuple会重新发送，包含在txid=5的批次中。
+	在使用IOpaquePartitionedTransactionalSpout时，因为tuple与txid的对应关系有可能改变，因此与业务计算结果同时保存一个txid就无
+	法保证事务性了。这时候解决方案会稍微复杂一些，除了保存业务计算结果以外，还要保存两个元素：前一批次的业务计算结果以及本批次的事务ID。
+	我们以一个更简单的计算全局count的例子作说明，假设目前的统计结果为：
+	{ value = 4,
+	  prevValue = 1,
+	  txid = 2
+	}
+	新的一批次txid=3的增量count是2
+	可以保证完整事务性的计算应该是：检查新批次的txid与已保存的txid，如果两个txid相同，说明此批次消息已经来过。但是由于I.O.P.T.Spout
+	不保证同批次消息重发后所包含的tuple和之前一致，因此这时候要重新计算这批次的值，即value = preValue + 新发来的增量。如果两个txid
+	不相同，说明此批次消息不是重发的消息，那么value = value + 新发来的增量。根据这个计算逻辑，新计算后的结果应该为：
+	{ value = 6,
+	  prevValue = 4,
+	  txid = 3
+	}
+	但是假设新的一批次的txid不是3而是2，增量count同样为2，那么新计算后的结果应该为：
+	{ value = 3,
+	  prevValue = 1,
+	  txid = 2
+	}
+	I.O.P.T.Spout 接口同样有两个嵌套类：I.O.P.T.Spout.Coordinator 和 I.O.P.T.Spout.Emitter<X>
+	相比IPartitionedTransactionalSpout.Emitter<X>的下面两个发射方法：
+	a) X emitPartitionBatchNew(TransactionAttempt tx, BatchOutputCollector collector, int partition, X lastPartitionMeta);
+    	b) void emitPartitionBatch(TransactionAttempt tx, BatchOutputCollector collector, int partition, X partitionMeta);
+	IOpaquePartitionedTransactionalSpout.Emitter<X>类的发射方法从2个变成了1个：
+	a) X emitPartitionBatch(TransactionAttempt tx, BatchOutputCollector collector, int partition, X lastPartitionMeta);
+	它不区分发新消息还是重发旧消息，全部用emitPartitionBatch搞定。虽然emitPartitionBatch返回的X应该是下一批次供自己使用的
+	（emitPartitionBatch的第4个参数），但是只有一个批次成功以后X才会更新到ZooKeeper中，如果失败重发，emitPartitionBatch读取的X还是旧的。
+	所以这时候自定义的X不需要记录当前批次的开始偏移量和下一批次的开始偏移量两个值，只需要记录下一批次开始偏移量一个值即可，例如：
+	public class BatchMeta { 
+	    public long  nextOffset; //下一批次的偏移量    
+	}
+	最后简单做一个总结：
+	IPartitionedTransactionalSpout提供了一种最简单的处理事务型应用的方法，持久化存储中要额外保存txid，它可能会出现spout卡住的问题。
+	IOpaquePartitionedTransactionalSpout是最严谨的处理事务型应用的方法，但是使用它编写应用代码会更复杂一些，持久化存储中除了要额外
+	保存txid之外，还要保存前一批次的业务计算结果。
+
+	
+	事务拓扑的配置及API：
+	----------------------
 	事务拓扑有两个重要的配置：
-	zk的配置：默认情况下，事务拓扑会在相同的 zk 实例中保存状态，用于管理storm集群。可以通过设置 transactional.zookeeper.servers
-	和 transactional.zookeeper.port 进行修改。
+	zk的配置：默认情况下，事务拓扑会在相同的 zk 实例中保存状态，用于管理storm集群。可以通过设置 
+	transactional.zookeeper.servers和 transactional.zookeeper.port 进行修改。
 	一次允许的活跃batch数：必须限制一次处理的batch的数量。可以使用 topology.max.spout.pending，默认值为 1。
+	
+	构建拓扑：
+	一般使用 TransactionalTopologyBuilder 来构建事务拓扑（集成到 Trident 中，已被弃用）。
 	
 	注意事项：
 	当使用普通的 bolt 时，可以调用OutputCollector的fail方法来处理元组树的失败情况，其中元组是元组树的一个成员。由于事务拓扑隐藏了ack
 	框架，提供一个不同的机制处理一个 batch 的失败，重发失败的 batch，并抛出一个 FailException 异常。不同于普通的异常，这只会引发普通
 	batch 的重发，并不会导致进程的崩溃。
-	
-	构建拓扑：
-	一般使用 TransactionalTopologyBuilder 来构建事务拓扑（集成到 Trident 中，已被弃用）。
-	
-	Bolt：
-	在事务拓扑中存在3种类型的 Bolt，即BasicBolt、BatchBolt、标记为Committer的BatchBolt。
-	a) BasicBolt 不能处理 batch，只能处理单个输入元组，并在处理完成之后发射新的元组；
-	b) BatchBolt 能够处理 batch，batch 中的每一个元组都会调用 execute 方法，当 batch 处理完成之后调用 finishBatch 方法；
-	c) 标记为Committer的BatchBolt和普通BatchBolt的区别是调用 finishBatch 的时机。Committer BatchBolt 在提交阶段会调用
-	   finishBatch，当所有的batch 都已经成功提交，提交阶段会出现，它会不停重试，直到【拓扑中的所有 bolt 成功提交 batch】。
-	   有两种方法可以使 BatchBolt 成为 Committer BatchBolt，即实现ICommitter接口或者使用TransactionalTopologyBuilder
-	   类的 setCommiterBolt 方法。
-	
-	Spout：
-	ITransactionalSpout：这个接口完全不同于普通的Spout接口，它实现发射一批元组，并保证相同事务的id总是发射相同的元组batch。
-	事务拓扑执行时的事务 Spout如下所示。左边的协调器是普通的 Spout，不断发送 batch 中的元组。发射器作为普通的 Bolt 执行，负责发射 
-	batch 中的元组。发射器使用广播分组订阅协调器的“批量发射（batch emit）”流。元组的发射请求是幂等的，需要 TransactionSpout保存
-	少量的状态到 zk 中。
-	IPartitionedTransactionalSpout：分区事务Spout从很多队列代理的分区中集中读取 batch，它自动管理每个分区的状态，保证等概率重发。
-	       
-	                       __________ 发射器任务
-			             |
-               协调任务------|---------->发射器任务
-			             |__________ 发射器任务
-	        
+	 
 	 
 ### Trident
 
