@@ -64,6 +64,22 @@ public class MyLogCountTxBolt extends BaseTransactionalBolt {
 	@Override
 	public void finishBatch() {
 		collector.emit(new Values(tx, count));
+		System.err.println("MyLogCountTxBolt@" + this.hashCode() + "#finishBatch, tx.txid=" + tx.getTransactionId() + ", tx.attemptId=" + tx.getAttemptId() + ", count=" + count);
+		//MyLogCountTxBolt@783765674#finishBatch, tx.txid=1, tx.attemptId=2243358004186960407, count=5
+		//MyLogCountTxBolt@1443189179#finishBatch, tx.txid=1, tx.attemptId=2243358004186960407, count=8
+		//MyLogCountTxBolt@958276434#finishBatch, tx.txid=1, tx.attemptId=2243358004186960407, count=7
+		
+		//MyLogCountTxBolt@544254732#finishBatch, tx.txid=2, tx.attemptId=-1516662102336376242, count=6
+		//MyLogCountTxBolt@1489155339#finishBatch, tx.txid=2, tx.attemptId=-1516662102336376242, count=6
+		//MyLogCountTxBolt@1552302839#finishBatch, tx.txid=2, tx.attemptId=-1516662102336376242, count=8
+		
+		//MyLogCountTxBolt@340455046#finishBatch, tx.txid=3, tx.attemptId=3121103668892972913, count=7
+		//MyLogCountTxBolt@609172442#finishBatch, tx.txid=3, tx.attemptId=3121103668892972913, count=5
+		//MyLogCountTxBolt@1560099531#finishBatch, tx.txid=3, tx.attemptId=3121103668892972913, count=8
+		
+		//MyLogCountTxBolt@1632477495#finishBatch, tx.txid=4, tx.attemptId=7991583790903691476, count=4
+		//MyLogCountTxBolt@436191024#finishBatch, tx.txid=4, tx.attemptId=7991583790903691476, count=5
+		//MyLogCountTxBolt@26300611#finishBatch, tx.txid=4, tx.attemptId=7991583790903691476, count=11
 	}
 
 	@Override
