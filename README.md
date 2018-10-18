@@ -4,11 +4,11 @@
 ### nimbus、supervisor
 
 	storm 常见守护进程：
-		nimbus
-		ui
-		drpc
-		logviwer
-		supervisor
+		nimbus		监管supervisor进程
+		supervisor	监管worker进程
+		ui 			httpweb客户端进程
+		drpc			RPC进程
+		logviwer		日志收集进程
 		
 ### worker（进程）
 	
@@ -39,8 +39,12 @@
 	
 	storm 的一个很好的特性是，可以增加或者减少工作进程数（worker）或 执行器（executor）的数量而不需要重新启动集群或拓扑，
 	这个过程被称为 storm的再平衡。
+	注意：如果storm进行了扩容，而没有再平衡，则新的节点是idle的。在rebalance时，首先将会deacticate拓扑任务，
+	然后重新分发work的任务使每个work中的任务尽量均衡，几秒或几分钟之后，topology将重新回到以前的激活状态。
 	有两种方式实现拓扑再平衡，使用 storm ui 或者 使用 cli shell:
 	$ storm rebanlance xxxTopology -n 5 -e xxxSpout=3 -e xxxBolt=10
+	-n: 表示进程数（worker数）
+	-e: 表示执行线程数（executor数）
 	
 ### topology
 
@@ -80,7 +84,7 @@
 ### 序列化
 	
 	一般配置：
-	storm 使用 kryo 实现序列化和反序列化，默认情况下可以对 原始类型、字符串、字符数组、ArrayList、HashMap、HashSet 和
+	storm 使用 kryo 实现序列化和反序列化，默认情况下可以对 原始类型、字符串、字符数组、ArrayList、HashMap、HashSet和
 	Clojure集合进行序列化，如果想要在元组中使用另一种类型，则需要注册一个自定义的 序列化器。添加自定义序列化器是通过配置的 
 	topology.kryo.register 属性完成的，它需要一个注册的列表，每个注册项可以采取以下两种形式：
 	a) 类名注册，在这种情况下，storm 将使用 kryo 的 FieldsSerializer 来序列化该类
